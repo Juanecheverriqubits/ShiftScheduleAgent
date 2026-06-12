@@ -1,2 +1,0 @@
-holidays>=0.40
-openpyxl>=3.1
