@@ -1,0 +1,84 @@
+"""
+Orquestador mensual (diseñado para GitHub Actions).
+Se ejecuta todos los lunes; solo actúa si es el último lunes del mes.
+Genera el horario del mes siguiente y lo envía al trigger HTTP de
+Power Automate, que lo publica en Teams.
+
+Variables de entorno:
+    POWER_AUTOMATE_URL  (secret)  URL del trigger HTTP del flujo
+    FORCE               "true" para ignorar la verificación de último lunes
+    INPUT_YEAR / INPUT_MONTH      mes específico (opcional)
+    RESTRICCIONES       "Pedro:2026-07-05:2026-07-10;Diego:..." (opcional)
+"""
+import calendar
+import os
+import subprocess
+import sys
+from datetime import date
+
+import send_to_power_automate
+
+OUTPUT_DIR = "output"
+
+
+def is_last_monday(today=None):
+    today = today or date.today()
+    if today.weekday() != 0:
+        return False
+    return today.day + 7 > calendar.monthrange(today.year, today.month)[1]
+
+
+def main():
+    today = date.today()
+    force = os.environ.get("FORCE", "").lower() == "true"
+
+    if not is_last_monday(today) and not force:
+        print(f"{today}: no es el último lunes del mes. No se genera nada.")
+        return
+
+    in_year = os.environ.get("INPUT_YEAR", "").strip()
+    in_month = os.environ.get("INPUT_MONTH", "").strip()
+    if in_year and in_month:
+        year, month = int(in_year), int(in_month)
+    elif today.month == 12:
+        year, month = today.year + 1, 1
+    else:
+        year, month = today.year, today.month + 1
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    out_path = os.path.join(OUTPUT_DIR, f"horario_{month:02d}_{year}.xlsx")
+
+    cmd = [sys.executable, "generate_schedule.py",
+           "--year", str(year), "--month", str(month), "--out", out_path]
+    for r in os.environ.get("RESTRICCIONES", "").split(";"):
+        if r.strip():
+            cmd += ["--restriccion", r.strip()]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print("ERROR generando el horario:", result.stderr, file=sys.stderr)
+        sys.exit(1)
+    print(result.stdout)
+
+    msg_path = out_path.replace(".xlsx", "_mensaje.txt")
+    with open(msg_path) as f:
+        mensaje = f.read()
+
+    flow_url = os.environ.get("POWER_AUTOMATE_URL")
+    if not flow_url:
+        print("ADVERTENCIA: POWER_AUTOMATE_URL no configurada. "
+              "El archivo queda como artifact del workflow.", file=sys.stderr)
+        return
+
+    try:
+        send_to_power_automate.send(out_path, mensaje, flow_url)
+    except Exception as e:
+        # No perder el archivo: queda como artifact (paso del workflow)
+        print(f"ERROR enviando a Power Automate: {e}. "
+              f"El Excel quedó guardado como artifact del workflow.",
+              file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
